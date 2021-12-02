@@ -119,6 +119,7 @@ type CloudFlareProvider struct {
 type cloudFlareChange struct {
 	Action         string
 	ResourceRecord cloudflare.DNSRecord
+	OldTarget      string
 }
 
 // NewCloudFlareProvider initializes a new CloudFlare DNS based Provider.
@@ -227,7 +228,7 @@ func (p *CloudFlareProvider) ApplyChanges(ctx context.Context, changes *plan.Cha
 
 	for _, endpoint := range changes.Create {
 		for _, target := range endpoint.Targets {
-			cloudflareChanges = append(cloudflareChanges, p.newCloudFlareChange(cloudFlareCreate, endpoint, target))
+			cloudflareChanges = append(cloudflareChanges, p.newCloudFlareChange(cloudFlareCreate, endpoint, target, ""))
 		}
 	}
 
@@ -237,21 +238,27 @@ func (p *CloudFlareProvider) ApplyChanges(ctx context.Context, changes *plan.Cha
 		add, remove, leave := provider.Difference(current.Targets, desired.Targets)
 
 		for _, a := range add {
-			cloudflareChanges = append(cloudflareChanges, p.newCloudFlareChange(cloudFlareCreate, desired, a))
+			// check if we have a pending remove, update instead
+			if len(remove) > 0 {
+				cloudflareChanges = append(cloudflareChanges, p.newCloudFlareChange(cloudFlareUpdate, desired, a, remove[0]))
+				remove = remove[1:]
+			} else {
+				cloudflareChanges = append(cloudflareChanges, p.newCloudFlareChange(cloudFlareCreate, desired, a, ""))
+			}
 		}
 
 		for _, a := range leave {
-			cloudflareChanges = append(cloudflareChanges, p.newCloudFlareChange(cloudFlareUpdate, desired, a))
+			cloudflareChanges = append(cloudflareChanges, p.newCloudFlareChange(cloudFlareUpdate, desired, a, ""))
 		}
 
 		for _, a := range remove {
-			cloudflareChanges = append(cloudflareChanges, p.newCloudFlareChange(cloudFlareDelete, current, a))
+			cloudflareChanges = append(cloudflareChanges, p.newCloudFlareChange(cloudFlareDelete, current, a, ""))
 		}
 	}
 
 	for _, endpoint := range changes.Delete {
 		for _, target := range endpoint.Targets {
-			cloudflareChanges = append(cloudflareChanges, p.newCloudFlareChange(cloudFlareDelete, endpoint, target))
+			cloudflareChanges = append(cloudflareChanges, p.newCloudFlareChange(cloudFlareDelete, endpoint, target, ""))
 		}
 	}
 
@@ -301,7 +308,7 @@ func (p *CloudFlareProvider) submitChanges(ctx context.Context, changes []*cloud
 			}
 
 			if change.Action == cloudFlareUpdate {
-				recordID := p.getRecordID(records, change.ResourceRecord)
+				recordID := p.getRecordIDFromChange(records, change)
 				if recordID == "" {
 					log.WithFields(logFields).Errorf("failed to find previous record: %v", change.ResourceRecord)
 					continue
@@ -374,7 +381,16 @@ func (p *CloudFlareProvider) getRecordID(records []cloudflare.DNSRecord, record 
 	return ""
 }
 
-func (p *CloudFlareProvider) newCloudFlareChange(action string, endpoint *endpoint.Endpoint, target string) *cloudFlareChange {
+func (p *CloudFlareProvider) getRecordIDFromChange(records []cloudflare.DNSRecord, change *cloudFlareChange) string {
+	for _, zoneRecord := range records {
+		if zoneRecord.Name == change.ResourceRecord.Name && zoneRecord.Type == change.ResourceRecord.Type && (zoneRecord.Content == change.ResourceRecord.Content || zoneRecord.Content == change.OldTarget) {
+			return zoneRecord.ID
+		}
+	}
+	return ""
+}
+
+func (p *CloudFlareProvider) newCloudFlareChange(action string, endpoint *endpoint.Endpoint, target string, oldTarget string) *cloudFlareChange {
 	ttl := defaultCloudFlareRecordTTL
 	proxied := shouldBeProxied(endpoint, p.proxiedByDefault)
 
@@ -395,6 +411,7 @@ func (p *CloudFlareProvider) newCloudFlareChange(action string, endpoint *endpoi
 			Type:    endpoint.RecordType,
 			Content: target,
 		},
+		OldTarget: oldTarget,
 	}
 }
 
